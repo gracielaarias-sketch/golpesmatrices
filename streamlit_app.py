@@ -35,9 +35,6 @@ VALID_PIEZA_COLS = [
     'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
 ]
 
-# FECHA DE CORTE (Reinicio de contadores a 0)
-CUTOFF_DATE = pd.to_datetime("2026-01-01", format="%Y-%m-%d")
-
 # ==========================================
 # 3. FUNCIONES DE LIMPIEZA Y CARGA
 # ==========================================
@@ -152,6 +149,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
     col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), None)
     col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), None)
     col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), None)
+    col_golpes_historicos = next((c for c in df_cat.columns if 'CANTIDAD DE GOLPES' in c.upper()), None)
     
     if not col_pieza or not col_op:
         return pd.DataFrame(), pd.DataFrame()
@@ -170,6 +168,10 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') if col_alerta else 0
         if pd.isna(limite_mant) or limite_mant <= 0: limite_mant = 20000
         if pd.isna(limite_alerta) or limite_alerta <= 0: limite_alerta = limite_mant * 0.8
+        
+        # Histórico de golpes base
+        golpes_base_catalogo = pd.to_numeric(row.get(col_golpes_historicos, 0), errors='coerce') if col_golpes_historicos else 0
+        if pd.isna(golpes_base_catalogo): golpes_base_catalogo = 0
         
         fecha_prev = pd.NaT
         fecha_corr = pd.NaT
@@ -222,19 +224,17 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_corr):
             fecha_base = fecha_corr
 
-        # C) Sumar Producción (Reinicio total el 01/01/2026)
+        # C) Sumar Producción (Usando todos los datos disponibles)
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
-        # La fecha de inicio de conteo NUNCA será anterior al 01/01/2026
-        fecha_inicio_conteo = CUTOFF_DATE
-        if pd.notna(fecha_base) and fecha_base > CUTOFF_DATE:
-            fecha_inicio_conteo = fecha_base
-            
-        # Filtramos la producción solo desde la fecha de conteo (01/01/2026 o el mant. más reciente)
-        prod_match = prod_match[prod_match['Fecha'] >= fecha_inicio_conteo]
-        golpes_acumulados = prod_match['Golpes_Totales'].sum()
+        if pd.notna(fecha_base):
+            # Si hay un mantenimiento, sumamos toda la producción de esa fecha en adelante
+            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
+            golpes_acumulados = prod_match['Golpes_Totales'].sum()
+        else:
+            # Si no hay mantenimiento, sumamos el historial base y TODA la producción registrada
+            golpes_acumulados = golpes_base_catalogo + prod_match['Golpes_Totales'].sum()
         
-        # D) Determinar estado (Semáforo)
         estado = "OK"
         color = "VERDE"
         
@@ -529,9 +529,9 @@ if datos_listos:
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA. Todo conteo se inicia a partir del 01/01/2026.")
+        st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA.")
     with col2:
-        if st.button("Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
+        if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices y generando graficos..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
                 
