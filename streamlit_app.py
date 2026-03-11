@@ -3,7 +3,6 @@ import pandas as pd
 from datetime import datetime
 import tempfile
 import os
-import re
 from fpdf import FPDF
 
 # ==========================================
@@ -14,7 +13,6 @@ st.set_page_config(page_title="Control de Golpes de Matrices", layout="wide", pa
 st.markdown("""
 <style>
     .header-style { font-size: 26px; font-weight: bold; margin-bottom: 5px; color: #1F2937; text-align: center; }
-    .metric-container { display: flex; justify-content: space-around; background-color: #f8f9fa; padding: 10px; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -41,98 +39,97 @@ VALID_PIEZA_COLS = [
 # 3. FUNCIONES DE LIMPIEZA Y CARGA
 # ==========================================
 def clean_str(val):
+    """Limpia strings para que el cruce sea exacto (Ej: '20.0' -> '20')"""
     if pd.isna(val): return ""
     v = str(val).strip().upper()
     if v.endswith('.0'): v = v[:-2]
     return v
 
+def get_match_key(pieza_str):
+    """Si la pieza tiene '/', toma solo la primera parte para evitar duplicar piezas pares (Izq/Der)."""
+    return pieza_str.split('/')[0].strip() if '/' in pieza_str else pieza_str
+
 def extract_mantenimientos(url):
-    """Extrae Fecha, Matriz y OP de los formularios de mantenimiento."""
+    """Extrae Fecha, Matriz y la Operacion correcta de los formularios de mantenimiento."""
     try:
         df = pd.read_csv(url)
-        df.columns = df.columns.astype(str).str.upper().str.strip()
+        cols = [str(c).upper().strip() for c in df.columns]
         
-        # Buscar columna de fecha
-        col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
-        if not col_fecha: return pd.DataFrame()
+        col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c), None)
+        if col_fecha is None: return pd.DataFrame()
 
         registros = []
         for _, row in df.iterrows():
-            fecha = pd.to_datetime(row[col_fecha], dayfirst=True, errors='coerce')
+            fecha = pd.to_datetime(row.iloc[col_fecha], dayfirst=True, errors='coerce')
             if pd.isna(fecha): continue
             
-            # Buscar piezas y operaciones
-            for i, col_name in enumerate(df.columns):
+            # Buscar columnas de PIEZA (FIAT, RENAULT, NISSAN)
+            for i, col_name in enumerate(cols):
                 base_col = col_name.split('.')[0].strip()
+                
                 if base_col in VALID_PIEZA_COLS:
-                    pieza = clean_str(row.iloc[i])
-                    if pieza and pieza not in ['NAN', 'NONE', '-', '0', 'N/A', 'NO APLICA']:
+                    pieza_completa = clean_str(row.iloc[i])
+                    if pieza_completa and pieza_completa not in ['NAN', 'NONE', '-', '0', 'N/A', 'NO APLICA', '']:
+                        pieza_match = get_match_key(pieza_completa)
                         op = ""
-                        # Buscar la OP en las columnas siguientes
-                        for j in range(i+1, min(i+4, len(df.columns))):
-                            if 'OPERACION' in df.columns[j] or 'OPERACIÓN' in df.columns[j]:
+                        
+                        # Buscar la columna "OPERACION" inmediatamente a la derecha
+                        for j in range(i+1, min(i+4, len(cols))):
+                            next_col = cols[j].split('.')[0].strip()
+                            if 'OPERACION' in next_col or 'OPERACIÓN' in next_col or 'OP' == next_col:
                                 op = clean_str(row.iloc[j])
                                 break
-                        registros.append({'Fecha': fecha, 'Pieza': pieza, 'OP': op})
+                        
+                        registros.append({
+                            'Fecha': fecha, 
+                            'Pieza_Completa': pieza_completa, 
+                            'Pieza_Match': pieza_match, 
+                            'OP': op
+                        })
         return pd.DataFrame(registros)
     except Exception as e:
-        print(f"Error cargando mant: {e}")
+        print(f"Error cargando mantenimiento: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def load_all_data():
-    # 1. Cargar Catálogo (Filtrado por FAMMA ACTIVO? == SI)
-    df_cat = pd.read_csv(URL_CATALOGO, skiprows=1) # Saltamos la primera fila de super-encabezados
-    df_cat.columns = df_cat.columns.astype(str).str.strip().str.replace('\n', '')
+    # --- 1. CARGAR CATÁLOGO MAESTRO ---
+    df_cat = pd.read_csv(URL_CATALOGO)
+    df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
+    df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
     
-    col_activo = next((c for c in df_cat.columns if 'FAMMA' in c.upper() and 'ACTIVO' in c.upper()), None)
+    col_activo = next((c for c in df_cat.columns if 'ACTIVO' in c.upper()), None)
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
 
-    # 2. Cargar Producción
+    # --- 2. CARGAR PRODUCCIÓN ---
     df_prod = pd.read_csv(URL_PRODUCCION)
-    
-    # Limpiamos los nombres de las columnas para evitar problemas de espacios ocultos
     df_prod.columns = df_prod.columns.astype(str).str.strip()
     
-    # Fechas
     col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
     if col_fecha_prod:
         df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], dayfirst=True, errors='coerce')
     else:
         df_prod['Fecha'] = pd.NaT
     
-    # Calcular golpes totales (Buenas + Retrabajo)
+    # Calcular golpes (Buenas + Retrabajo)
     col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
     col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
     
-    if col_buenas:
-        df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
-    else:
-        df_prod['Buenas_Num'] = 0
-        
-    if col_retrabajo:
-        df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
-    else:
-        df_prod['Retrabajo_Num'] = 0
-        
+    df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_buenas else 0
+    df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_retrabajo else 0
     df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
     
-    # Búsqueda dinámica de Código Producto y OP
-    col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower()), None)
-    col_op_prod = next((c for c in df_prod.columns if c.lower() == 'op' or 'operación' in c.lower() or 'operacion' in c.lower()), None)
-
+    # Extraer código de pieza y aplicar llave de anti-duplicación
+    col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
     if col_pieza_prod:
-        df_prod['Pieza_Clean'] = df_prod[col_pieza_prod].apply(clean_str)
+        df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x)))
     else:
-        df_prod['Pieza_Clean'] = "" 
+        df_prod['Pieza_Match'] = "" 
         
-    if col_op_prod:
-        df_prod['OP_Clean'] = df_prod[col_op_prod].apply(clean_str)
-    else:
-        df_prod['OP_Clean'] = ""
+    # Nota: Ya no buscamos OP en Producción, todas las OP de la matriz suman los mismos golpes
 
-    # 3. Cargar Mantenimientos
+    # --- 3. CARGAR FORMULARIOS DE MANTENIMIENTO ---
     df_prev = extract_mantenimientos(URL_PREV_FAMMA)
     df_corr = extract_mantenimientos(URL_CORR_FAMMA)
     df_mant_historico = pd.concat([df_prev, df_corr], ignore_index=True)
@@ -145,44 +142,66 @@ def load_all_data():
 def procesar_estado_matrices(df_cat, df_prod, df_mant):
     resultados = []
     
+    # Búsqueda de las columnas en el Catálogo
+    col_pieza = next((c for c in df_cat.columns if c.upper() == 'PIEZA'), None)
+    col_op = next((c for c in df_cat.columns if c.upper() == 'OP'), None)
+    col_cliente = next((c for c in df_cat.columns if 'CLIENTE' in c.upper()), None)
+    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c.upper()), None)
+    col_limite = next((c for c in df_cat.columns if 'GOLPES PARA MANTENIMIENTO' in c.upper()), None)
+    col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), None)
+    col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), None)
+    col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), None)
+    
+    if not col_pieza or not col_op:
+        return pd.DataFrame()
+
     for _, row in df_cat.iterrows():
-        pieza = clean_str(row.get('PIEZA', ''))
-        op = clean_str(row.get('OP', ''))
-        cliente = clean_str(row.get('CLIENTE', '-'))
-        tipo = clean_str(row.get('TIPO', '-'))
+        pieza_completa = clean_str(row.get(col_pieza, ''))
+        op = clean_str(row.get(col_op, ''))
+        cliente = clean_str(row.get(col_cliente, '-')) if col_cliente else '-'
+        tipo = clean_str(row.get(col_tipo, '-')) if col_tipo else '-'
         
-        if not pieza: continue
+        if not pieza_completa or pieza_completa == 'NAN': continue
         
-        limite_mant = pd.to_numeric(row.get('GOLPES PARA MANTENIMIENTO', 0), errors='coerce')
-        limite_alerta = pd.to_numeric(row.get('ALERTA', 0), errors='coerce')
-        if pd.isna(limite_mant) or limite_mant <= 0: limite_mant = 20000 # Valor fallback
+        # Generar llave única (ignorar L/R si aplica)
+        pieza_match = get_match_key(pieza_completa)
+        
+        # Límites
+        limite_mant = pd.to_numeric(row.get(col_limite, 0), errors='coerce') if col_limite else 0
+        limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') if col_alerta else 0
+        if pd.isna(limite_mant) or limite_mant <= 0: limite_mant = 20000
         if pd.isna(limite_alerta) or limite_alerta <= 0: limite_alerta = limite_mant * 0.8
         
-        # Determinar la fecha base (la más reciente entre el catálogo y los formularios)
         fecha_base = pd.NaT
         
-        # A) Fecha desde el catálogo (Ultimo Preventivo o Correctivo)
-        d_prev = pd.to_datetime(row.get('Ultimo Preventivo'), dayfirst=True, errors='coerce')
-        d_corr = pd.to_datetime(row.get('Ultimo Correctivo'), dayfirst=True, errors='coerce')
-        if pd.notna(d_prev): fecha_base = d_prev
-        if pd.notna(d_corr) and (pd.isna(fecha_base) or d_corr > fecha_base): fecha_base = d_corr
+        # A) Revisar fechas manuales en el catálogo
+        if col_prev:
+            d_prev = pd.to_datetime(row.get(col_prev), dayfirst=True, errors='coerce')
+            if pd.notna(d_prev): fecha_base = d_prev
             
-        # B) Fecha desde los registros reales de formularios
+        if col_corr:
+            d_corr = pd.to_datetime(row.get(col_corr), dayfirst=True, errors='coerce')
+            if pd.notna(d_corr) and (pd.isna(fecha_base) or d_corr > fecha_base): 
+                fecha_base = d_corr
+            
+        # B) Revisar fechas en Google Forms (Mantenimiento). 
+        # Comparamos usando pieza_match y OP específica
         if not df_mant.empty:
-            mant_match = df_mant[(df_mant['Pieza'] == pieza) & (df_mant['OP'] == op)]
+            mant_match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
             if not mant_match.empty:
                 max_form_date = mant_match['Fecha'].max()
                 if pd.isna(fecha_base) or max_form_date > fecha_base:
                     fecha_base = max_form_date
 
-        # C) Sumar Producción posterior a la fecha base
-        prod_match = df_prod[(df_prod['Pieza_Clean'] == pieza) & (df_prod['OP_Clean'] == op)]
+        # C) Sumar Producción de la pieza
+        prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         if pd.notna(fecha_base):
+            # Solo suma los golpes fabricados DESPUÉS del mantenimiento de ESTA OP particular
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
             
         golpes_acumulados = prod_match['Golpes_Totales'].sum()
         
-        # D) Lógica de Semáforo
+        # D) Determinar estado (Semáforo)
         estado = "OK"
         color = "VERDE"
         
@@ -195,7 +214,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
             
         resultados.append({
             'CLIENTE': cliente,
-            'PIEZA': pieza,
+            'PIEZA': pieza_completa, # Mostramos el nombre real completo
             'OP': op,
             'TIPO': tipo,
             'ULT_MANTENIMIENTO': fecha_base.strftime('%d/%m/%Y') if pd.notna(fecha_base) else "Sin Registro",
@@ -206,7 +225,12 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
             'COLOR': color
         })
         
-    return pd.DataFrame(resultados).sort_values(by=['COLOR', 'GOLPES'], ascending=[False, False])
+    df_resultados = pd.DataFrame(resultados)
+    
+    if df_resultados.empty:
+        return pd.DataFrame(columns=['CLIENTE', 'PIEZA', 'OP', 'TIPO', 'ULT_MANTENIMIENTO', 'GOLPES', 'LIMITE', 'ALERTA', 'ESTADO', 'COLOR'])
+        
+    return df_resultados.sort_values(by=['COLOR', 'GOLPES'], ascending=[False, False])
 
 # ==========================================
 # 5. GENERACIÓN DEL PDF (FPDF)
@@ -219,14 +243,14 @@ class PDFGolpes(FPDF):
         
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
-        self.cell(0, 5, f"Cálculo generado el: {datetime.now().strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        self.cell(0, 5, f"Calculo generado el: {datetime.now().strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
         self.ln(3)
 
-        # Encabezados de tabla (Ancho Total: 277mm para Landscape)
         self.set_font("Arial", 'B', 9)
         self.set_fill_color(31, 73, 125)
         self.set_text_color(255, 255, 255)
         
+        # Anchos adaptados (Total 277mm)
         self.cell(20, 8, "Cliente", 1, 0, 'C', fill=True)
         self.cell(65, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
         self.cell(15, 8, "OP", 1, 0, 'C', fill=True)
@@ -243,21 +267,29 @@ class PDFGolpes(FPDF):
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
 def build_pdf_golpes(df_resultados):
-    pdf = PDFGolpes(orientation='L', unit='mm', format='A4') # Landscape
+    pdf = PDFGolpes(orientation='L', unit='mm', format='A4') # Formato Apaisado
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", '', 8)
     
+    if df_resultados.empty:
+        pdf.cell(0, 10, "No se encontraron matrices activas para procesar.", align='C')
+        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        pdf.output(temp_pdf.name)
+        with open(temp_pdf.name, "rb") as f: pdf_bytes = f.read()
+        os.remove(temp_pdf.name)
+        return pdf_bytes
+
     for _, row in df_resultados.iterrows():
-        # Lógica de Color para la celda de Golpes y Estado
+        # Paleta de colores suave para lectura clara
         if row['COLOR'] == "ROJO":
-            bg_color = (255, 180, 180) # Rojo pastel
+            bg_color = (255, 180, 180)
             txt_color = (180, 0, 0)
         elif row['COLOR'] == "AMARILLO":
-            bg_color = (255, 240, 180) # Amarillo pastel
+            bg_color = (255, 240, 180)
             txt_color = (150, 100, 0)
         else:
-            bg_color = (198, 239, 206) # Verde pastel
+            bg_color = (198, 239, 206)
             txt_color = (0, 100, 0)
             
         pieza_str = str(row['PIEZA'])[:40] 
@@ -269,7 +301,6 @@ def build_pdf_golpes(df_resultados):
         pdf.cell(12, 7, str(row['TIPO']), 1, 0, 'C')
         pdf.cell(30, 7, str(row['ULT_MANTENIMIENTO']), 1, 0, 'C')
         
-        # Celda de Golpes con Semáforo
         pdf.set_fill_color(*bg_color)
         pdf.set_text_color(*txt_color)
         pdf.set_font("Arial", 'B', 9)
@@ -279,7 +310,6 @@ def build_pdf_golpes(df_resultados):
         pdf.set_font("Arial", '', 8)
         pdf.cell(30, 7, f"{row['LIMITE']:,}", 1, 0, 'C')
         
-        # Celda de Estado con Semáforo
         pdf.set_fill_color(*bg_color)
         pdf.set_text_color(*txt_color)
         pdf.set_font("Arial", 'B', 8)
@@ -300,7 +330,7 @@ with st.spinner("Conectando y descargando bases de datos..."):
         df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
         datos_listos = True
     except Exception as e:
-        st.error(f"Error crítico conectando con Google Sheets: {e}")
+        st.error(f"Error critico conectando con Google Sheets: {e}")
         datos_listos = False
 
 if datos_listos:
@@ -314,20 +344,21 @@ if datos_listos:
             with st.spinner("Calculando estado de matrices..."):
                 df_resultados = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
                 
-                # Resumen Rápido en pantalla
-                rojos = len(df_resultados[df_resultados['COLOR'] == 'ROJO'])
-                amarillos = len(df_resultados[df_resultados['COLOR'] == 'AMARILLO'])
-                verdes = len(df_resultados[df_resultados['COLOR'] == 'VERDE'])
-                
-                st.write(f"**Resumen:** 🔴 {rojos} Críticas | 🟡 {amarillos} En Alerta | 🟢 {verdes} OK")
-                
-                # Construir PDF
-                pdf_data = build_pdf_golpes(df_resultados)
-                
-                st.download_button(
-                    label="📥 Descargar Reporte en PDF",
-                    data=pdf_data,
-                    file_name=f"Reporte_Golpes_Matrices_{datetime.now().strftime('%d%m%Y')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                if df_resultados.empty:
+                    st.warning("No se encontraron datos que procesar. Revisa que el catalogo tenga matrices marcadas como 'SI' en la columna de Activos.")
+                else:
+                    rojos = len(df_resultados[df_resultados['COLOR'] == 'ROJO'])
+                    amarillos = len(df_resultados[df_resultados['COLOR'] == 'AMARILLO'])
+                    verdes = len(df_resultados[df_resultados['COLOR'] == 'VERDE'])
+                    
+                    st.write(f"**Resumen de Estado:** 🔴 {rojos} Críticas | 🟡 {amarillos} En Alerta | 🟢 {verdes} OK")
+                    
+                    pdf_data = build_pdf_golpes(df_resultados)
+                    
+                    st.download_button(
+                        label="📥 Descargar Reporte en PDF",
+                        data=pdf_data,
+                        file_name=f"Reporte_Golpes_Matrices_{datetime.now().strftime('%d%m%Y')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
