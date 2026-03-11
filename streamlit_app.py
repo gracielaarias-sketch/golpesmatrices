@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import tempfile
 import os
+import plotly.graph_objects as go
 from fpdf import FPDF
 
 # ==========================================
@@ -151,6 +152,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
     col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), None)
     col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), None)
     col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), None)
+    col_golpes_historicos = next((c for c in df_cat.columns if 'CANTIDAD DE GOLPES' in c.upper()), None)
     
     if not col_pieza or not col_op:
         return pd.DataFrame(), pd.DataFrame()
@@ -169,6 +171,9 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') if col_alerta else 0
         if pd.isna(limite_mant) or limite_mant <= 0: limite_mant = 20000
         if pd.isna(limite_alerta) or limite_alerta <= 0: limite_alerta = limite_mant * 0.8
+        
+        golpes_base_catalogo = pd.to_numeric(row.get(col_golpes_historicos, 0), errors='coerce') if col_golpes_historicos else 0
+        if pd.isna(golpes_base_catalogo): golpes_base_catalogo = 0
         
         fecha_prev = pd.NaT
         fecha_corr = pd.NaT
@@ -190,10 +195,8 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         if not df_mant.empty:
             mant_match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
             
-            # --- Buscar terminados para actualizar fechas ---
             mant_term = mant_match[mant_match['Terminado'] == 'SI']
             if not mant_term.empty:
-                # Separar Preventivos de Correctivos en los Forms
                 mant_term_prev = mant_term[mant_term['Tipo_Mant'] == 'PREV']
                 mant_term_corr = mant_term[mant_term['Tipo_Mant'] == 'CORR']
                 
@@ -207,7 +210,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
                     if pd.isna(fecha_corr) or max_corr_form > fecha_corr:
                         fecha_corr = max_corr_form
                     
-            # --- Buscar mantenimientos abiertos ---
             mant_abiertos = mant_match[mant_match['Terminado'] == 'NO']
             if not mant_abiertos.empty:
                 tiene_abierto = True
@@ -215,7 +217,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
                 fecha_abierto = mant_abiertos.loc[idx_max_ab, 'Fecha']
                 tipo_abierto = mant_abiertos.loc[idx_max_ab, 'Tipo_Mant']
 
-        # Definir la fecha base como la MÁS RECIENTE entre Preventivo y Correctivo
         fecha_base = pd.NaT
         if pd.notna(fecha_prev) and pd.notna(fecha_corr):
             fecha_base = max(fecha_prev, fecha_corr)
@@ -224,18 +225,16 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_corr):
             fecha_base = fecha_corr
 
-        # C) Sumar Producción (Contadores reiniciados en 0 el 01/01/2026)
+        # C) Sumar Producción con lógica de empalme histórico 2026
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
-        # La fecha de inicio de conteo NUNCA será anterior al 01/01/2026
-        fecha_inicio_conteo = CUTOFF_DATE
-        if pd.notna(fecha_base) and fecha_base > CUTOFF_DATE:
-            fecha_inicio_conteo = fecha_base
-            
-        prod_match = prod_match[prod_match['Fecha'] >= fecha_inicio_conteo]
-        golpes_acumulados = prod_match['Golpes_Totales'].sum()
+        if pd.isna(fecha_base) or fecha_base < CUTOFF_DATE:
+            prod_match = prod_match[prod_match['Fecha'] >= CUTOFF_DATE]
+            golpes_acumulados = golpes_base_catalogo + prod_match['Golpes_Totales'].sum()
+        else:
+            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
+            golpes_acumulados = prod_match['Golpes_Totales'].sum()
         
-        # D) Determinar estado (Semáforo)
         estado = "OK"
         color = "VERDE"
         
@@ -288,7 +287,10 @@ class PDFGolpes(FPDF):
         
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
-        self.cell(0, 5, f"Calculo generado el: {datetime.now().strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        
+        # HORA ARGENTINA (UTC-3)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
+        self.cell(0, 5, f"Calculo generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
         self.ln(3)
 
     def footer(self):
@@ -316,7 +318,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
     
-    # Encabezados (Suma Total 277mm)
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(60, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
@@ -364,7 +365,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_font("Arial", 'B', 8)
         pdf.cell(92, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
-    # --- ANEXO: MANTENIMIENTOS ABIERTOS ---
+    # --- ANEXO 1: MANTENIMIENTOS ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12)
@@ -396,6 +397,121 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(35, 7, str(row_ab['TIPO_MANT_ABIERTO']), 1, 0, 'C')
             pdf.cell(35, 7, str(row_ab['FECHA_APERTURA']), 1, 1, 'C')
 
+    # --- ANEXO 2: ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO ---
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 14)
+    pdf.set_text_color(31, 73, 125)
+    pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C')
+    pdf.ln(5)
+    
+    # 1. Procesamiento de Estadísticas
+    resumen_data = []
+    clientes = sorted([c for c in df_resultados['CLIENTE'].unique() if c != "-"])
+    
+    total_general = len(df_resultados)
+    total_con_prev_general = len(df_resultados[df_resultados['ULT_PREV'] != "-"])
+    total_sin_prev_general = total_general - total_con_prev_general
+    
+    for c in clientes:
+        df_c = df_resultados[df_resultados['CLIENTE'] == c]
+        tot = len(df_c)
+        con = len(df_c[df_c['ULT_PREV'] != "-"])
+        sin = tot - con
+        p_con = (con / tot * 100) if tot > 0 else 0
+        p_sin = (sin / tot * 100) if tot > 0 else 0
+        
+        resumen_data.append({
+            'CLIENTE': c, 'TOTAL OP': tot, 'CON PREV': con, 'SIN MANT': sin,
+            'PCT_TOTAL': '100%', 'PCT_CON': f"{int(round(p_con))}%", 'PCT_SIN': f"{int(round(p_sin))}%"
+        })
+        
+    p_con_gen = (total_con_prev_general / total_general * 100) if total_general > 0 else 0
+    p_sin_gen = (total_sin_prev_general / total_general * 100) if total_general > 0 else 0
+    
+    # 2. Dibujar Tabla
+    pdf.set_font("Arial", 'B', 10)
+    pdf.set_fill_color(31, 73, 125)
+    pdf.set_text_color(255, 255, 255)
+    
+    # Anchos para centrar la tabla (Suma = 190, Margen A4 apaisado es 297mm. Centro X = 53.5)
+    w_cliente, w_tot, w_num, w_pct = 40, 25, 30, 20
+    margen_x = 53.5
+    
+    pdf.set_x(margen_x)
+    pdf.cell(w_cliente, 8, "CLIENTE", 1, 0, 'C', fill=True)
+    pdf.cell(w_tot, 8, "TOTAL OP", 1, 0, 'C', fill=True)
+    pdf.cell(w_num, 8, "CON PREVENTIVO", 1, 0, 'C', fill=True)
+    pdf.cell(w_num, 8, "SIN MANT.", 1, 0, 'C', fill=True)
+    pdf.cell(w_pct, 8, "TOTAL %", 1, 0, 'C', fill=True)
+    pdf.cell(w_pct, 8, "% PREV", 1, 0, 'C', fill=True)
+    pdf.cell(w_pct, 8, "% SIN MANT", 1, 1, 'C', fill=True)
+    
+    for row in resumen_data:
+        pdf.set_x(margen_x)
+        pdf.set_font("Arial", '', 10)
+        pdf.set_fill_color(255, 255, 255)
+        pdf.set_text_color(0, 0, 0)
+        
+        pdf.cell(w_cliente, 8, str(row['CLIENTE']), 1, 0, 'C', fill=False)
+        pdf.cell(w_tot, 8, str(row['TOTAL OP']), 1, 0, 'C', fill=False)
+        pdf.cell(w_num, 8, str(row['CON PREV']), 1, 0, 'C', fill=False)
+        pdf.cell(w_num, 8, str(row['SIN MANT']), 1, 0, 'C', fill=False)
+        pdf.cell(w_pct, 8, str(row['PCT_TOTAL']), 1, 0, 'C', fill=False)
+        pdf.cell(w_pct, 8, str(row['PCT_CON']), 1, 0, 'C', fill=False)
+        pdf.cell(w_pct, 8, str(row['PCT_SIN']), 1, 1, 'C', fill=False)
+        
+    # Dibujar fila de TOTALES
+    pdf.set_x(margen_x)
+    pdf.set_font("Arial", 'B', 10)
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_text_color(0, 0, 0)
+    
+    pdf.cell(w_cliente, 8, "TOTAL", 1, 0, 'C', fill=True)
+    pdf.cell(w_tot, 8, str(total_general), 1, 0, 'C', fill=True)
+    pdf.cell(w_num, 8, str(total_con_prev_general), 1, 0, 'C', fill=True)
+    pdf.cell(w_num, 8, str(total_sin_prev_general), 1, 0, 'C', fill=True)
+    pdf.cell(w_pct, 8, "100%", 1, 0, 'C', fill=True)
+    pdf.cell(w_pct, 8, f"{int(round(p_con_gen))}%", 1, 0, 'C', fill=True)
+    pdf.cell(w_pct, 8, f"{int(round(p_sin_gen))}%", 1, 1, 'C', fill=True)
+    
+    # 3. Dibujar Gráfico Visual (Plotly)
+    if total_general > 0:
+        df_chart = pd.DataFrame(resumen_data)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df_chart['CLIENTE'],
+            y=df_chart['CON PREV'],
+            name='Con Preventivo',
+            marker_color='#2ca02c', # Verde
+            text=df_chart['PCT_CON'],
+            textposition='auto'
+        ))
+        fig.add_trace(go.Bar(
+            x=df_chart['CLIENTE'],
+            y=df_chart['SIN MANT'],
+            name='Sin Mantenimiento',
+            marker_color='#d62728', # Rojo
+            text=df_chart['PCT_SIN'],
+            textposition='auto'
+        ))
+        
+        fig.update_layout(
+            title="Distribucion de Mantenimiento por Cliente",
+            barmode='group',
+            width=750,
+            height=400,
+            plot_bgcolor='rgba(0,0,0,0)',
+            legend=dict(x=0.8, y=1.0)
+        )
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+            fig.write_image(tmpfile.name, engine="kaleido")
+            pdf.ln(10)
+            # Centrar la imagen en la hoja (ancho de imagen 160mm)
+            pdf.image(tmpfile.name, x=68.5, w=160)
+            os.remove(tmpfile.name)
+
     temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(temp_pdf.name)
     with open(temp_pdf.name, "rb") as f:
@@ -422,7 +538,7 @@ if datos_listos:
         st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA. Todo conteo se inicia a partir del 01/01/2026.")
     with col2:
         if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
-            with st.spinner("Calculando estado de matrices..."):
+            with st.spinner("Calculando estado de matrices y generando graficos..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
                 
                 if df_res.empty:
@@ -438,10 +554,12 @@ if datos_listos:
                     
                     pdf_data = build_pdf_golpes(df_res, df_abiertos)
                     
+                    hora_arg = datetime.utcnow() - timedelta(hours=3)
+                    
                     st.download_button(
                         label="📥 Descargar Reporte en PDF",
                         data=pdf_data,
-                        file_name=f"Reporte_Golpes_Matrices_{datetime.now().strftime('%d%m%Y')}.pdf",
+                        file_name=f"Reporte_Golpes_Matrices_{hora_arg.strftime('%d%m%Y')}.pdf",
                         mime="application/pdf",
                         use_container_width=True
                     )
