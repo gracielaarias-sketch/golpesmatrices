@@ -232,7 +232,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
-    # Anexo 1: Abiertos
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
@@ -247,7 +246,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C'); pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
             pdf.cell(15, 7, r['OP'], 1, 0, 'C'); pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C'); pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
-    # Anexo 2: Resumen y Gráfico
+    # Anexo Resumen Final
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
     pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C'); pdf.ln(5)
@@ -266,8 +265,8 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 48.5; pdf.set_x(mx)
     pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(30, 8, "TOTAL OP", 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, "CON PREVENTIVO", 1, 0, 'C', fill=True); pdf.cell(35, 8, "SIN MANT.", 1, 0, 'C', fill=True)
-    pdf.cell(20, 8, "% PREV", 1, 0, 'C', fill=True); pdf.cell(30, 8, "% SIN MANT", 1, 1, 'C', fill=True)
+    pdf.cell(35, 8, "OK (GOLPES BAJOS)", 1, 0, 'C', fill=True); pdf.cell(35, 8, "SIN MANT (REQUERIDO).", 1, 0, 'C', fill=True)
+    pdf.cell(20, 8, "% OK", 1, 0, 'C', fill=True); pdf.cell(30, 8, "% SIN MANT", 1, 1, 'C', fill=True)
     
     pdf.set_font("Arial", '', 10); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
@@ -281,10 +280,10 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%", 1, 1, 'C', fill=True)
     
-    # Gráfico
+    # Gráfico Corregido
     df_chart = pd.DataFrame(resumen_data)
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='Con Preventivo (OK)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
+    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='OK (Sin necesidad de Mant.)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
     fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['NOK'], name='Sin Mantenimiento (Alerta/Req)', marker_color='#d62728', text=df_chart['PNOK'], textposition='auto'))
     fig.update_layout(title="Estado de Mantenimiento por Cliente", barmode='group', width=750, height=400, plot_bgcolor='rgba(0,0,0,0)', legend=dict(x=0.7, y=1.1))
     
@@ -296,18 +295,45 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.output(buf.name); b = open(buf.name, "rb").read(); os.remove(buf.name); return b
 
 # ==========================================
-# 6. INTERFAZ DE STREAMLIT
+# 6. INTERFAZ DE STREAMLIT (LAYOUT ORIGINAL)
 # ==========================================
 with st.spinner("Cargando bases..."):
     try:
-        c, p, m = load_all_data()
-        st.success("Datos sincronizados.")
-        if st.button("🚀 Generar PDF de Golpes", type="primary"):
-            res, ab = procesar_estado_matrices(c, p, m)
-            if res.empty: st.warning("No hay datos activos.")
-            else:
-                st.write(f"**Resumen:** 🔴 {len(res[res['COLOR']=='ROJO'])} Críticas | 🟡 {len(res[res['COLOR']=='AMARILLO'])} Alerta | 🟢 {len(res[res['COLOR']=='VERDE'])} OK")
-                pdf_bytes = build_pdf_golpes(res, ab)
-                h = datetime.utcnow() - timedelta(hours=3)
-                st.download_button("📥 Descargar Reporte", data=pdf_bytes, file_name=f"Control_Golpes_{h.strftime('%d%m%Y')}.pdf", mime="application/pdf", use_container_width=True)
-    except Exception as e: st.error(f"Error: {e}")
+        df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
+        datos_listos = True
+    except Exception as e:
+        st.error(f"Error critico: {e}")
+        datos_listos = False
+
+if datos_listos:
+    st.success("Bases de datos sincronizadas exitosamente.")
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA.")
+    with col2:
+        if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
+            with st.spinner("Calculando estado de matrices y generando graficos..."):
+                df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
+                
+                if df_res.empty:
+                    st.warning("No se encontraron datos que procesar.")
+                else:
+                    rojos = len(df_res[df_res['COLOR'] == 'ROJO'])
+                    amarillos = len(df_res[df_res['COLOR'] == 'AMARILLO'])
+                    verdes = len(df_res[df_res['COLOR'] == 'VERDE'])
+                    
+                    st.write(f"**Resumen de Estado:** 🔴 {rojos} Críticas | 🟡 {amarillos} En Alerta | 🟢 {verdes} OK")
+                    if not df_abiertos.empty:
+                        st.caption(f"⚠️ *Atencion: Existen {len(df_abiertos)} mantenimientos abiertos que impiden el reinicio de golpes.*")
+                    
+                    pdf_data = build_pdf_golpes(df_res, df_abiertos)
+                    hora_arg = datetime.utcnow() - timedelta(hours=3)
+                    
+                    st.download_button(
+                        label="📥 Descargar Reporte en PDF",
+                        data=pdf_data,
+                        file_name=f"Reporte_Golpes_Matrices_{hora_arg.strftime('%d%m%Y')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
