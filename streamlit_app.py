@@ -219,11 +219,10 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_corr):
             fecha_base = fecha_corr
 
-        # C) Sumar Producción (ÚNICA Y EXCLUSIVAMENTE DEL ARCHIVO DE PRODUCCIÓN)
+        # C) Sumar Producción pura
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
         if pd.notna(fecha_base):
-            # Si hay un mantenimiento, sumamos toda la producción de esa fecha en adelante
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
             
         golpes_acumulados = prod_match['Golpes_Totales'].sum()
@@ -401,152 +400,5 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     clientes = sorted([c for c in df_resultados['CLIENTE'].unique() if c != "-"])
     
     total_general = len(df_resultados)
-    total_con_prev_general = len(df_resultados[df_resultados['ULT_PREV'] != "-"])
-    total_sin_prev_general = total_general - total_con_prev_general
     
-    for c in clientes:
-        df_c = df_resultados[df_resultados['CLIENTE'] == c]
-        tot = len(df_c)
-        con = len(df_c[df_c['ULT_PREV'] != "-"])
-        sin = tot - con
-        p_con = (con / tot * 100) if tot > 0 else 0
-        p_sin = (sin / tot * 100) if tot > 0 else 0
-        
-        resumen_data.append({
-            'CLIENTE': c, 'TOTAL OP': tot, 'CON PREV': con, 'SIN MANT': sin,
-            'PCT_TOTAL': '100%', 'PCT_CON': f"{int(round(p_con))}%", 'PCT_SIN': f"{int(round(p_sin))}%"
-        })
-        
-    p_con_gen = (total_con_prev_general / total_general * 100) if total_general > 0 else 0
-    p_sin_gen = (total_sin_prev_general / total_general * 100) if total_general > 0 else 0
-    
-    pdf.set_font("Arial", 'B', 10)
-    pdf.set_fill_color(31, 73, 125)
-    pdf.set_text_color(255, 255, 255)
-    
-    w_cliente, w_tot, w_num, w_pct = 40, 25, 30, 20
-    margen_x = 53.5
-    
-    pdf.set_x(margen_x)
-    pdf.cell(w_cliente, 8, "CLIENTE", 1, 0, 'C', fill=True)
-    pdf.cell(w_tot, 8, "TOTAL OP", 1, 0, 'C', fill=True)
-    pdf.cell(w_num, 8, "CON PREVENTIVO", 1, 0, 'C', fill=True)
-    pdf.cell(w_num, 8, "SIN MANT.", 1, 0, 'C', fill=True)
-    pdf.cell(w_pct, 8, "TOTAL %", 1, 0, 'C', fill=True)
-    pdf.cell(w_pct, 8, "% PREV", 1, 0, 'C', fill=True)
-    pdf.cell(w_pct, 8, "% SIN MANT", 1, 1, 'C', fill=True)
-    
-    for row in resumen_data:
-        pdf.set_x(margen_x)
-        pdf.set_font("Arial", '', 10)
-        pdf.set_fill_color(255, 255, 255)
-        pdf.set_text_color(0, 0, 0)
-        
-        pdf.cell(w_cliente, 8, str(row['CLIENTE']), 1, 0, 'C', fill=False)
-        pdf.cell(w_tot, 8, str(row['TOTAL OP']), 1, 0, 'C', fill=False)
-        pdf.cell(w_num, 8, str(row['CON PREV']), 1, 0, 'C', fill=False)
-        pdf.cell(w_num, 8, str(row['SIN MANT']), 1, 0, 'C', fill=False)
-        pdf.cell(w_pct, 8, str(row['PCT_TOTAL']), 1, 0, 'C', fill=False)
-        pdf.cell(w_pct, 8, str(row['PCT_CON']), 1, 0, 'C', fill=False)
-        pdf.cell(w_pct, 8, str(row['PCT_SIN']), 1, 1, 'C', fill=False)
-        
-    pdf.set_x(margen_x)
-    pdf.set_font("Arial", 'B', 10)
-    pdf.set_fill_color(220, 220, 220)
-    pdf.set_text_color(0, 0, 0)
-    
-    pdf.cell(w_cliente, 8, "TOTAL", 1, 0, 'C', fill=True)
-    pdf.cell(w_tot, 8, str(total_general), 1, 0, 'C', fill=True)
-    pdf.cell(w_num, 8, str(total_con_prev_general), 1, 0, 'C', fill=True)
-    pdf.cell(w_num, 8, str(total_sin_prev_general), 1, 0, 'C', fill=True)
-    pdf.cell(w_pct, 8, "100%", 1, 0, 'C', fill=True)
-    pdf.cell(w_pct, 8, f"{int(round(p_con_gen))}%", 1, 0, 'C', fill=True)
-    pdf.cell(w_pct, 8, f"{int(round(p_sin_gen))}%", 1, 1, 'C', fill=True)
-    
-    if total_general > 0:
-        df_chart = pd.DataFrame(resumen_data)
-        
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_chart['CLIENTE'],
-            y=df_chart['CON PREV'],
-            name='Con Preventivo',
-            marker_color='#2ca02c', 
-            text=df_chart['PCT_CON'],
-            textposition='auto'
-        ))
-        fig.add_trace(go.Bar(
-            x=df_chart['CLIENTE'],
-            y=df_chart['SIN MANT'],
-            name='Sin Mantenimiento',
-            marker_color='#d62728', 
-            text=df_chart['PCT_SIN'],
-            textposition='auto'
-        ))
-        
-        fig.update_layout(
-            title="Distribucion de Mantenimiento por Cliente",
-            barmode='group',
-            width=750,
-            height=400,
-            plot_bgcolor='rgba(0,0,0,0)',
-            legend=dict(x=0.8, y=1.0)
-        )
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-            fig.write_image(tmpfile.name, engine="kaleido")
-            pdf.ln(10)
-            pdf.image(tmpfile.name, x=68.5, w=160)
-            os.remove(tmpfile.name)
-
-    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(temp_pdf.name)
-    with open(temp_pdf.name, "rb") as f:
-        pdf_bytes = f.read()
-    os.remove(temp_pdf.name)
-    return pdf_bytes
-
-# ==========================================
-# 6. INTERFAZ DE STREAMLIT
-# ==========================================
-with st.spinner("Conectando y descargando bases de datos..."):
-    try:
-        df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
-        datos_listos = True
-    except Exception as e:
-        st.error(f"Error critico conectando con Google Sheets: {e}")
-        datos_listos = False
-
-if datos_listos:
-    st.success("Bases de datos sincronizadas exitosamente.")
-    
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA.")
-    with col2:
-        if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
-            with st.spinner("Calculando estado de matrices y generando graficos..."):
-                df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
-                
-                if df_res.empty:
-                    st.warning("No se encontraron datos que procesar. Revisa que el catalogo tenga matrices marcadas como 'SI' en la columna de Activos.")
-                else:
-                    rojos = len(df_res[df_res['COLOR'] == 'ROJO'])
-                    amarillos = len(df_res[df_res['COLOR'] == 'AMARILLO'])
-                    verdes = len(df_res[df_res['COLOR'] == 'VERDE'])
-                    
-                    st.write(f"**Resumen de Estado:** 🔴 {rojos} Críticas | 🟡 {amarillos} En Alerta | 🟢 {verdes} OK")
-                    if not df_abiertos.empty:
-                        st.caption(f"⚠️ *Atencion: Existen {len(df_abiertos)} mantenimientos abiertos que impiden el reinicio de golpes.*")
-                    
-                    pdf_data = build_pdf_golpes(df_res, df_abiertos)
-                    
-                    hora_arg = datetime.utcnow() - timedelta(hours=3)
-                    
-                    st.download_button(
-                        label="📥 Descargar Reporte en PDF",
-                        data=pdf_data,
-                        file_name=f"Reporte_Golpes_Matrices_{hora_arg.strftime('%d%m%Y')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
+    # IMPORTANTE: Ahora "Con Preventivo" significa "ESTADO == 'OK'"
