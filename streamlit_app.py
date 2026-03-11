@@ -149,7 +149,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
     col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), None)
     col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), None)
     col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), None)
-    col_golpes_historicos = next((c for c in df_cat.columns if 'CANTIDAD DE GOLPES' in c.upper()), None)
     
     if not col_pieza or not col_op:
         return pd.DataFrame(), pd.DataFrame()
@@ -168,10 +167,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') if col_alerta else 0
         if pd.isna(limite_mant) or limite_mant <= 0: limite_mant = 20000
         if pd.isna(limite_alerta) or limite_alerta <= 0: limite_alerta = limite_mant * 0.8
-        
-        # Histórico de golpes base
-        golpes_base_catalogo = pd.to_numeric(row.get(col_golpes_historicos, 0), errors='coerce') if col_golpes_historicos else 0
-        if pd.isna(golpes_base_catalogo): golpes_base_catalogo = 0
         
         fecha_prev = pd.NaT
         fecha_corr = pd.NaT
@@ -224,16 +219,14 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_corr):
             fecha_base = fecha_corr
 
-        # C) Sumar Producción (Usando todos los datos disponibles)
+        # C) Sumar Producción (ÚNICA Y EXCLUSIVAMENTE DEL ARCHIVO DE PRODUCCIÓN)
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
         if pd.notna(fecha_base):
             # Si hay un mantenimiento, sumamos toda la producción de esa fecha en adelante
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
-            golpes_acumulados = prod_match['Golpes_Totales'].sum()
-        else:
-            # Si no hay mantenimiento, sumamos el historial base y TODA la producción registrada
-            golpes_acumulados = golpes_base_catalogo + prod_match['Golpes_Totales'].sum()
+            
+        golpes_acumulados = prod_match['Golpes_Totales'].sum()
         
         estado = "OK"
         color = "VERDE"
