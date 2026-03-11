@@ -152,7 +152,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
     col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), None)
     col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), None)
     col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), None)
-    col_golpes_historicos = next((c for c in df_cat.columns if 'CANTIDAD DE GOLPES' in c.upper()), None)
     
     if not col_pieza or not col_op:
         return pd.DataFrame(), pd.DataFrame()
@@ -171,9 +170,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') if col_alerta else 0
         if pd.isna(limite_mant) or limite_mant <= 0: limite_mant = 20000
         if pd.isna(limite_alerta) or limite_alerta <= 0: limite_alerta = limite_mant * 0.8
-        
-        golpes_base_catalogo = pd.to_numeric(row.get(col_golpes_historicos, 0), errors='coerce') if col_golpes_historicos else 0
-        if pd.isna(golpes_base_catalogo): golpes_base_catalogo = 0
         
         fecha_prev = pd.NaT
         fecha_corr = pd.NaT
@@ -217,6 +213,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
                 fecha_abierto = mant_abiertos.loc[idx_max_ab, 'Fecha']
                 tipo_abierto = mant_abiertos.loc[idx_max_ab, 'Tipo_Mant']
 
+        # Definir la fecha base como la MÁS RECIENTE entre Preventivo y Correctivo
         fecha_base = pd.NaT
         if pd.notna(fecha_prev) and pd.notna(fecha_corr):
             fecha_base = max(fecha_prev, fecha_corr)
@@ -225,16 +222,19 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_corr):
             fecha_base = fecha_corr
 
-        # C) Sumar Producción con lógica de empalme histórico 2026
+        # C) Sumar Producción (Reinicio total el 01/01/2026)
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
-        if pd.isna(fecha_base) or fecha_base < CUTOFF_DATE:
-            prod_match = prod_match[prod_match['Fecha'] >= CUTOFF_DATE]
-            golpes_acumulados = golpes_base_catalogo + prod_match['Golpes_Totales'].sum()
-        else:
-            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
-            golpes_acumulados = prod_match['Golpes_Totales'].sum()
+        # La fecha de inicio de conteo NUNCA será anterior al 01/01/2026
+        fecha_inicio_conteo = CUTOFF_DATE
+        if pd.notna(fecha_base) and fecha_base > CUTOFF_DATE:
+            fecha_inicio_conteo = fecha_base
+            
+        # Filtramos la producción solo desde la fecha de conteo (01/01/2026 o el mant. más reciente)
+        prod_match = prod_match[prod_match['Fecha'] >= fecha_inicio_conteo]
+        golpes_acumulados = prod_match['Golpes_Totales'].sum()
         
+        # D) Determinar estado (Semáforo)
         estado = "OK"
         color = "VERDE"
         
@@ -404,7 +404,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C')
     pdf.ln(5)
     
-    # 1. Procesamiento de Estadísticas
     resumen_data = []
     clientes = sorted([c for c in df_resultados['CLIENTE'].unique() if c != "-"])
     
@@ -428,12 +427,10 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     p_con_gen = (total_con_prev_general / total_general * 100) if total_general > 0 else 0
     p_sin_gen = (total_sin_prev_general / total_general * 100) if total_general > 0 else 0
     
-    # 2. Dibujar Tabla
     pdf.set_font("Arial", 'B', 10)
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
     
-    # Anchos para centrar la tabla (Suma = 190, Margen A4 apaisado es 297mm. Centro X = 53.5)
     w_cliente, w_tot, w_num, w_pct = 40, 25, 30, 20
     margen_x = 53.5
     
@@ -460,7 +457,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.cell(w_pct, 8, str(row['PCT_CON']), 1, 0, 'C', fill=False)
         pdf.cell(w_pct, 8, str(row['PCT_SIN']), 1, 1, 'C', fill=False)
         
-    # Dibujar fila de TOTALES
     pdf.set_x(margen_x)
     pdf.set_font("Arial", 'B', 10)
     pdf.set_fill_color(220, 220, 220)
@@ -474,7 +470,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(w_pct, 8, f"{int(round(p_con_gen))}%", 1, 0, 'C', fill=True)
     pdf.cell(w_pct, 8, f"{int(round(p_sin_gen))}%", 1, 1, 'C', fill=True)
     
-    # 3. Dibujar Gráfico Visual (Plotly)
     if total_general > 0:
         df_chart = pd.DataFrame(resumen_data)
         
@@ -483,7 +478,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             x=df_chart['CLIENTE'],
             y=df_chart['CON PREV'],
             name='Con Preventivo',
-            marker_color='#2ca02c', # Verde
+            marker_color='#2ca02c', 
             text=df_chart['PCT_CON'],
             textposition='auto'
         ))
@@ -491,7 +486,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             x=df_chart['CLIENTE'],
             y=df_chart['SIN MANT'],
             name='Sin Mantenimiento',
-            marker_color='#d62728', # Rojo
+            marker_color='#d62728', 
             text=df_chart['PCT_SIN'],
             textposition='auto'
         ))
@@ -508,7 +503,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
             fig.write_image(tmpfile.name, engine="kaleido")
             pdf.ln(10)
-            # Centrar la imagen en la hoja (ancho de imagen 160mm)
             pdf.image(tmpfile.name, x=68.5, w=160)
             os.remove(tmpfile.name)
 
@@ -537,7 +531,7 @@ if datos_listos:
     with col1:
         st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA. Todo conteo se inicia a partir del 01/01/2026.")
     with col2:
-        if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
+        if st.button("Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices y generando graficos..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
                 
