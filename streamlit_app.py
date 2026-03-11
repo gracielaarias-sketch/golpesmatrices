@@ -45,6 +45,7 @@ def clean_str(val):
     return v
 
 def get_match_key(pieza_str):
+    """Extrae el prefijo antes de la barra para manejar piezas pares."""
     return pieza_str.split('/')[0].strip() if '/' in pieza_str else pieza_str
 
 def extract_mantenimientos(url, tipo_mant):
@@ -80,23 +81,30 @@ def extract_mantenimientos(url, tipo_mant):
 
 @st.cache_data(ttl=300)
 def load_all_data():
+    # 1. Catálogo
     df_cat = pd.read_csv(URL_CATALOGO)
     df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
     df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
     col_activo = next((c for c in df_cat.columns if 'ACTIVO' in c.upper()), None)
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
+    
+    # 2. Producción
     df_prod = pd.read_csv(URL_PRODUCCION)
     df_prod.columns = df_prod.columns.astype(str).str.strip()
     col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
     df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], dayfirst=True, errors='coerce') if col_fecha_prod else pd.NaT
+    
     col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
     col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
     df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_buenas else 0
     df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_retrabajo else 0
     df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
+    
     col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
     df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x))) if col_pieza_prod else "" 
+    
+    # 3. Mantenimientos
     df_prev = extract_mantenimientos(URL_PREV_FAMMA, "PREV")
     df_corr = extract_mantenimientos(URL_CORR_FAMMA, "CORR")
     return df_cat, df_prod, pd.concat([df_prev, df_corr], ignore_index=True)
@@ -115,23 +123,24 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
     col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), 'ALERTA')
     col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), 'ULTIMO PREVENTIVO')
     col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), 'ULTIMO CORRECTIVO')
-    col_golpes_historicos = next((c for c in df_cat.columns if 'CANTIDAD DE GOLPES' in c.upper()), 'CANTIDAD DE GOLPES')
 
     for _, row in df_cat.iterrows():
         pieza_completa = clean_str(row.get(col_pieza, ''))
         op = clean_str(row.get(col_op, ''))
         if not pieza_completa or pieza_completa == 'NAN': continue
         pieza_match = get_match_key(pieza_completa)
+        
         limite_mant = pd.to_numeric(row.get(col_limite, 0), errors='coerce') or 20000
         limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') or (limite_mant * 0.8)
-        golpes_base = pd.to_numeric(row.get(col_golpes_historicos, 0), errors='coerce') or 0
         
         fecha_prev, fecha_corr, fecha_abierto = pd.NaT, pd.NaT, pd.NaT
         tiene_abierto, tipo_abierto = False, ""
         
+        # Fechas manuales del catálogo
         if col_prev: fecha_prev = pd.to_datetime(row.get(col_prev), dayfirst=True, errors='coerce')
         if col_corr: fecha_corr = pd.to_datetime(row.get(col_corr), dayfirst=True, errors='coerce')
 
+        # Fechas de formularios
         if not df_mant.empty:
             match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
             term = match[match['Terminado'] == 'SI']
@@ -146,17 +155,18 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
                 fecha_abierto = ab['Fecha'].max()
                 tipo_abierto = ab.loc[ab['Fecha'].idxmax(), 'Tipo_Mant']
 
+        # Punto de reinicio de golpes
         fecha_base = pd.NaT
         if pd.notna(fecha_prev) and pd.notna(fecha_corr): fecha_base = max(fecha_prev, fecha_corr)
         elif pd.notna(fecha_prev): fecha_base = fecha_prev
         elif pd.notna(fecha_corr): fecha_base = fecha_corr
 
+        # CONTEO DE GOLPES: ÚNICAMENTE DESDE EL ARCHIVO DE PRODUCCIÓN
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         if pd.notna(fecha_base):
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
-            golpes_totales = prod_match['Golpes_Totales'].sum()
-        else:
-            golpes_totales = golpes_base + prod_match['Golpes_Totales'].sum()
+        
+        golpes_totales = int(prod_match['Golpes_Totales'].sum())
         
         color = "VERDE"
         estado = "OK"
@@ -169,7 +179,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
             'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
             'TIPO': clean_str(row.get(col_tipo, '-')), 'ULT_PREV': fecha_prev.strftime('%d/%m/%y') if pd.notna(fecha_prev) else "-",
             'ULT_CORR': fecha_corr.strftime('%d/%m/%y') if pd.notna(fecha_corr) else "-",
-            'GOLPES': int(golpes_totales), 'LIMITE': int(limite_mant), 'ESTADO': estado, 'COLOR': color
+            'GOLPES': golpes_totales, 'LIMITE': int(limite_mant), 'ESTADO': estado, 'COLOR': color
         })
         if tiene_abierto:
             abiertos.append({'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
@@ -200,7 +210,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Tabla Principal
+    # --- TABLA PRINCIPAL ---
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
@@ -232,12 +242,12 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
+    # --- ANEXO 1: ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
         pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
-        pdf.set_font("Arial", 'I', 9); pdf.set_text_color(100, 100, 100)
-        pdf.cell(0, 5, "Registros en proceso. Los golpes no se reinician hasta marcar como terminadas.", ln=True); pdf.ln(3)
+        pdf.ln(3)
         pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
         pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
         pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True); pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
@@ -246,27 +256,35 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C'); pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
             pdf.cell(15, 7, r['OP'], 1, 0, 'C'); pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C'); pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
-    # Anexo Resumen Final
+    # --- ANEXO 2: RESUMEN Y GRÁFICO ---
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
     pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C'); pdf.ln(5)
     
     resumen_data = []
     total_gen = len(df_resultados)
-    total_ok = len(df_resultados[df_resultados['ESTADO'] == 'OK'])
+    total_ok = len(df_resultados[df_resultados['COLOR'] == 'VERDE'])
     total_nok = total_gen - total_ok
     
     for c in sorted([x for x in df_resultados['CLIENTE'].unique() if x != "-"]):
         df_c = df_resultados[df_resultados['CLIENTE'] == c]
-        tot, ok = len(df_c), len(df_c[df_c['ESTADO'] == 'OK'])
+        tot = len(df_c)
+        ok = len(df_c[df_c['COLOR'] == 'VERDE'])
         nok = tot - ok
-        resumen_data.append({'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"})
+        resumen_data.append({
+            'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 
+            'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"
+        })
 
+    # Tabla de Títulos Correctos
     pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 48.5; pdf.set_x(mx)
-    pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(30, 8, "TOTAL OP", 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, "OK (GOLPES BAJOS)", 1, 0, 'C', fill=True); pdf.cell(35, 8, "SIN MANT (REQUERIDO).", 1, 0, 'C', fill=True)
-    pdf.cell(20, 8, "% OK", 1, 0, 'C', fill=True); pdf.cell(30, 8, "% SIN MANT", 1, 1, 'C', fill=True)
+    pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True)
+    pdf.cell(30, 8, "TOTAL OP", 1, 0, 'C', fill=True)
+    pdf.cell(35, 8, "CON PREVENTIVO", 1, 0, 'C', fill=True)
+    pdf.cell(35, 8, "SIN MANTENIMIENTO", 1, 0, 'C', fill=True)
+    pdf.cell(20, 8, "% PREV", 1, 0, 'C', fill=True)
+    pdf.cell(30, 8, "% SIN MANT", 1, 1, 'C', fill=True)
     
     pdf.set_font("Arial", '', 10); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
@@ -280,11 +298,11 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%", 1, 1, 'C', fill=True)
     
-    # Gráfico Corregido
+    # Gráfico Corregido (Renault y otros OK mostrarán 100% verde)
     df_chart = pd.DataFrame(resumen_data)
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='OK (Sin necesidad de Mant.)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
-    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['NOK'], name='Sin Mantenimiento (Alerta/Req)', marker_color='#d62728', text=df_chart['PNOK'], textposition='auto'))
+    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='CON PREVENTIVO (OK)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
+    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['NOK'], name='SIN MANTENIMIENTO (ALERTA/REQ)', marker_color='#d62728', text=df_chart['PNOK'], textposition='auto'))
     fig.update_layout(title="Estado de Mantenimiento por Cliente", barmode='group', width=750, height=400, plot_bgcolor='rgba(0,0,0,0)', legend=dict(x=0.7, y=1.1))
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
@@ -297,7 +315,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
 # ==========================================
 # 6. INTERFAZ DE STREAMLIT (LAYOUT ORIGINAL)
 # ==========================================
-with st.spinner("Cargando bases..."):
+with st.spinner("Conectando y descargando bases de datos..."):
     try:
         df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
         datos_listos = True
@@ -307,33 +325,20 @@ with st.spinner("Cargando bases..."):
 
 if datos_listos:
     st.success("Bases de datos sincronizadas exitosamente.")
-    
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.info("Este reporte cruza la **Producción Oficial**, el **Catálogo Maestro** y los **Mantenimientos Prev/Corr** para calcular el estado actual de las matrices activas en FAMMA.")
+        st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada.")
     with col2:
         if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
-            with st.spinner("Calculando estado de matrices y generando graficos..."):
+            with st.spinner("Calculando estado de matrices..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
-                
-                if df_res.empty:
-                    st.warning("No se encontraron datos que procesar.")
+                if df_res.empty: st.warning("No hay datos activos en el catálogo.")
                 else:
-                    rojos = len(df_res[df_res['COLOR'] == 'ROJO'])
-                    amarillos = len(df_res[df_res['COLOR'] == 'AMARILLO'])
-                    verdes = len(df_res[df_res['COLOR'] == 'VERDE'])
-                    
-                    st.write(f"**Resumen de Estado:** 🔴 {rojos} Críticas | 🟡 {amarillos} En Alerta | 🟢 {verdes} OK")
-                    if not df_abiertos.empty:
-                        st.caption(f"⚠️ *Atencion: Existen {len(df_abiertos)} mantenimientos abiertos que impiden el reinicio de golpes.*")
+                    rojos = len(df_res[df_res['COLOR']=='ROJO'])
+                    amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
+                    verdes = len(df_res[df_res['COLOR']=='VERDE'])
+                    st.write(f"**Resumen:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
                     
                     pdf_data = build_pdf_golpes(df_res, df_abiertos)
-                    hora_arg = datetime.utcnow() - timedelta(hours=3)
-                    
-                    st.download_button(
-                        label="📥 Descargar Reporte en PDF",
-                        data=pdf_data,
-                        file_name=f"Reporte_Golpes_Matrices_{hora_arg.strftime('%d%m%Y')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
+                    h = datetime.utcnow() - timedelta(hours=3)
+                    st.download_button(label="📥 Descargar Reporte en PDF", data=pdf_data, file_name=f"Reporte_Golpes_{h.strftime('%d%m%Y')}.pdf", mime="application/pdf", use_container_width=True)
