@@ -329,7 +329,7 @@ if datos_listos:
     with col1:
         st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada.")
     with col2:
-        if st.button("🚀 Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
+        if st.button("Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
                 if df_res.empty: st.warning("No hay datos activos en el catálogo.")
