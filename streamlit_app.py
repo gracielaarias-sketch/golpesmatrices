@@ -82,8 +82,7 @@ def extract_mantenimientos(url):
 @st.cache_data(ttl=300)
 def load_all_data():
     # 1. Cargar Catálogo (Filtrado por FAMMA ACTIVO? == SI)
-    df_cat = pd.read_csv(URL_CATALOGO, skiprows=1) # Saltamos la primera fila que suele tener super-encabezados
-    # Limpiamos nombres de columnas
+    df_cat = pd.read_csv(URL_CATALOGO, skiprows=1) # Saltamos la primera fila de super-encabezados
     df_cat.columns = df_cat.columns.astype(str).str.strip().str.replace('\n', '')
     
     col_activo = next((c for c in df_cat.columns if 'FAMMA' in c.upper() and 'ACTIVO' in c.upper()), None)
@@ -92,19 +91,46 @@ def load_all_data():
 
     # 2. Cargar Producción
     df_prod = pd.read_csv(URL_PRODUCCION)
+    
+    # Limpiamos los nombres de las columnas para evitar problemas de espacios ocultos
+    df_prod.columns = df_prod.columns.astype(str).str.strip()
+    
+    # Fechas
     col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
-    df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], dayfirst=True, errors='coerce')
+    if col_fecha_prod:
+        df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], dayfirst=True, errors='coerce')
+    else:
+        df_prod['Fecha'] = pd.NaT
     
     # Calcular golpes totales (Buenas + Retrabajo)
-    col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), 'Buenas')
-    col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), 'Retrabajo')
+    col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
+    col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
     
-    df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
-    df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
+    if col_buenas:
+        df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
+    else:
+        df_prod['Buenas_Num'] = 0
+        
+    if col_retrabajo:
+        df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
+    else:
+        df_prod['Retrabajo_Num'] = 0
+        
     df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
     
-    df_prod['Pieza_Clean'] = df_prod['Pieza'].apply(clean_str)
-    df_prod['OP_Clean'] = df_prod['OP'].apply(clean_str)
+    # Búsqueda dinámica de Código Producto y OP
+    col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower()), None)
+    col_op_prod = next((c for c in df_prod.columns if c.lower() == 'op' or 'operación' in c.lower() or 'operacion' in c.lower()), None)
+
+    if col_pieza_prod:
+        df_prod['Pieza_Clean'] = df_prod[col_pieza_prod].apply(clean_str)
+    else:
+        df_prod['Pieza_Clean'] = "" 
+        
+    if col_op_prod:
+        df_prod['OP_Clean'] = df_prod[col_op_prod].apply(clean_str)
+    else:
+        df_prod['OP_Clean'] = ""
 
     # 3. Cargar Mantenimientos
     df_prev = extract_mantenimientos(URL_PREV_FAMMA)
